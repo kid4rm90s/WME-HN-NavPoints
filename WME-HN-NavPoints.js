@@ -2,7 +2,7 @@
 // @name            WME HN NavPoints
 // @namespace       https://greasyfork.org/users/166843
 // @description     Shows navigation points of all house numbers in WME
-// @version         2026.04.21.03
+// @version         2026.04.21.04
 // @author          dBsooner
 // @grant           GM_info
 // @grant           GM_xmlhttpRequest
@@ -71,7 +71,6 @@
             processSegs: false
         },
         _timeouts = {
-            checkMarkersEvents: {},
             hideTooltip: undefined,
             onWmeReady: undefined,
             saveSettingsToStorage: undefined,
@@ -84,7 +83,7 @@
     const _HN_LINES_CHECKBOX = 'HN NavPoints';
     const _HN_NUMBERS_CHECKBOX = 'HN NavPoints Numbers';
 
-    // Internal feature tracking Maps (replace OL getFeaturesByAttribute)
+    // Internal feature tracking Maps
     let _allLineFeatures = new Map();    // featureId → [shadowFeature, coloredFeature]
     let _allNumberFeatures = new Map();  // featureId → numberFeature
     let _segmentHnIds = new Map();       // segmentId → Set<featureId>
@@ -92,7 +91,6 @@
 
     let _settings = {},
         _scriptActive = false,
-        _saveButtonObserver,
         _processedSegments = [],
         _segmentsToProcess = [],
         _recentlyDeletedSegmentIds = new Set(), // segments that had HNs deleted (pending undo check)
@@ -118,15 +116,6 @@
      */
     function logError(message, data = '') { console.error(`${_SCRIPT_SHORT_NAME}:`, new Error(message), data); }
 
-
-    /**
-     * Logs a debug message to console
-     * @param {string} message - The debug message
-     * @param {*} [data=''] - Optional debug data
-     */
-    function logDebug(message, data = '') {
-        console.log(`${_SCRIPT_SHORT_NAME}:`, message, data);
-    }
 
     /**
      * Gets the current map zoom level using WME SDK or fallback
@@ -471,7 +460,6 @@
         objArr.forEach((hnObj) => {
             const featureId = getHNId(hnObj);
             if (_allLineFeatures.has(featureId)) {
-                log(`removeHNs: Removing HN ${featureId}`);
                 _allLineFeatures.delete(featureId);
                 _allNumberFeatures.delete(featureId);
                 _numberFeatureMeta.delete(`n-${featureId}`);
@@ -484,13 +472,11 @@
                 }
                 hasChanges = true;
             } else {
-                log(`removeHNs: HN ${featureId} not found in _allLineFeatures`);
+                if (_DEBUG) log(`removeHNs: HN ${featureId} not found in _allLineFeatures`);
             }
         });
-        if (hasChanges) {
-            log(`removeHNs: Changes detected, redrawing layers`);
+        if (hasChanges)
             _redrawHNLayers();
-        }
     }
 
     /**
@@ -515,7 +501,7 @@
     function drawHNs(houseNumberArr) {
         if (houseNumberArr.length === 0)
             return;
-        log(`drawHNs called with ${houseNumberArr.length} HNs`);
+        if (_DEBUG) log(`drawHNs called with ${houseNumberArr.length} HNs`);
         doSpinner('drawHNs', true);
         let hasChanges = false;
         // Helper: support both legacy W HNs and SDK HouseNumbers
@@ -542,9 +528,8 @@
                 hasChanges = true;
                 const featureId = getHNId(hnObj);
                 const hnNumber = getHNNumber(hnObj);
-                const oldSegmentFromMeta = _numberFeatureMeta.get(`n-${featureId}`)?.segmentId;
                 
-                log(`  Processing HN ${hnNumber} (ID:${featureId}): oldSegment=${oldSegmentFromMeta}, newSegment=${segmentId}`);
+                if (_DEBUG) log(`  Processing HN ${hnNumber} (ID:${featureId}): newSegment=${segmentId}`);
                 
                 // Remove existing features for this HN from tracking maps
                 _allLineFeatures.delete(featureId);
@@ -564,27 +549,26 @@
                 // Fraction point (p1): entry point — convert to WGS84 if needed
                 let fractionLon, fractionLat;
                 const fractionPoint = getHNFractionPoint(hnObj);
-                log(`HN ${getHNNumber(hnObj)} (ID:${featureId}) - fractionPoint:`, fractionPoint);
                 
                 if (fractionPoint?.coordinates) {
                     [fractionLon, fractionLat] = fractionPoint.coordinates;
-                    log(`  Using SDK format: [${fractionLon}, ${fractionLat}]`);
+                    if (_DEBUG) log(`  fractionPoint SDK: [${fractionLon}, ${fractionLat}]`);
                 }
                 else if (fractionPoint?.x !== undefined && fractionPoint?.y !== undefined) {
                     const fp = mercatorToWGS84(fractionPoint.x, fractionPoint.y);
                     fractionLon = fp.lon;
                     fractionLat = fp.lat;
-                    log(`  Using legacy format: converted [${fractionPoint.x}, ${fractionPoint.y}] -> [${fractionLon}, ${fractionLat}]`);
+                    if (_DEBUG) log(`  fractionPoint legacy: [${fractionLon}, ${fractionLat}]`);
                 }
                 else {
                     // No fraction point — skip this HN
-                    log(`  ERROR: No entry point found for HN ${getHNNumber(hnObj)}`);
+                    logError(`No entry point for HN ${hnNumber} (ID:${featureId})`);
                     continue;
                 }
                 
                 // Validate entry point coordinates
                 if (!Number.isFinite(fractionLon) || !Number.isFinite(fractionLat)) {
-                    log(`Invalid entry point coords for HN ${getHNNumber(hnObj)}: [${fractionLon}, ${fractionLat}]`);
+                    logError(`Invalid entry point coords for HN ${hnNumber}: [${fractionLon}, ${fractionLat}]`);
                     continue;
                 }
                 
@@ -596,27 +580,23 @@
                     geomLon = gp.lon,
                     geomLat = gp.lat;
                 
-                log(`  Geometry: [${geomLon}, ${geomLat}]`);
-                
                 // Validate geometry point coordinates
                 if (!Number.isFinite(geomLon) || !Number.isFinite(geomLat)) {
-                    log(`  ERROR: Invalid geometry coords for HN ${getHNNumber(hnObj)}: [${geomLon}, ${geomLat}]`);
+                    logError(`Invalid geometry coords for HN ${hnNumber}: [${geomLon}, ${geomLat}]`);
                     continue;
                 }
                 
                 // Create line using turf for validation
                 const lineCoords = [[fractionLon, fractionLat], [geomLon, geomLat]];
-                log(`  Line coords: ${JSON.stringify(lineCoords)}`);
                 let lineFeature;
                 try {
                     lineFeature = turf.lineString(lineCoords);
                     if (!lineFeature.geometry || lineFeature.geometry.coordinates.length < 2) {
-                        log(`  ERROR: Invalid line geometry from turf`);
+                        logError(`Invalid line geometry from turf for HN ${hnNumber}`);
                         continue;
                     }
-                    log(`  Line validated successfully`);
                 } catch (err) {
-                    log(`  ERROR: Turf validation failed: ${err.message}`);
+                    logError(`Turf validation failed for HN ${hnNumber}: ${err.message}`);
                     continue;
                 }
                 
@@ -627,8 +607,6 @@
                 ),
                     numFeatId = `n-${featureId}`;
                 const hnText = getHNNumber(hnObj) || '';
-                
-                log(`  SUCCESS: Drawing HN ${hnText} in segment ${segmentId} with color ${strokeColor}`);
                 
                 // Store line features (shadow + colored)
                 _allLineFeatures.set(featureId, [
@@ -659,17 +637,10 @@
                     lon: geomLon,
                     lat: geomLat
                 });
-                log(`  Final: HN ${hnText} stored in segment ${segmentId}`);
             }
         }
-        if (hasChanges) {
-            const segmentCounts = {};
-            _segmentHnIds.forEach((idSet, segId) => {
-                segmentCounts[segId] = idSet.size;
-            });
-            log(`  Segment distribution: ${JSON.stringify(segmentCounts)}`);
+        if (hasChanges)
             _redrawHNLayers();
-        }
         doSpinner('drawHNs', false);
     }
 
@@ -706,25 +677,12 @@
      */
     function _redrawHNLayers() {
         if (!wmeSDK) return;
-        log(`_redrawHNLayers called - current features: ${_allLineFeatures.size} lines, ${_allNumberFeatures.size} numbers`);
-        
-        // Detailed breakdown of what's in _allLineFeatures
-        const linesBySegment = {};
-        _allLineFeatures.forEach((feature, fid) => {
-            const segId = feature.properties?.segmentId;
-            if (!linesBySegment[segId]) linesBySegment[segId] = [];
-            linesBySegment[segId].push(fid);
-        });
-        log(`  Lines by segment: ${JSON.stringify(linesBySegment)}`);
-        
         // Clear SDK layers completely
         wmeSDK.Map.removeAllFeaturesFromLayer({ layerName: _HN_LINES_LAYER });
         wmeSDK.Map.removeAllFeaturesFromLayer({ layerName: _HN_NUMBERS_LAYER });
-        
         // Add only the current tracked features
         const allLines = [..._allLineFeatures.values()].flat();
         const allNums = [..._allNumberFeatures.values()];
-        log(`  Adding ${allLines.length} line features and ${allNums.length} number features to SDK layers`);
         if (allLines.length)
             wmeSDK.Map.addFeaturesToLayer({ layerName: _HN_LINES_LAYER, features: allLines });
         if (allNums.length)
@@ -938,7 +896,7 @@
             return;
         const oldFeatureId = evt.oldID,
             newFeatureId = evt.newID;
-        log(`objectsChangedIdHNs: oldID=${oldFeatureId}, newID=${newFeatureId}`);
+        if (_DEBUG) log(`objectsChangedIdHNs: oldID=${oldFeatureId}, newID=${newFeatureId}`);
         if (_allLineFeatures.has(oldFeatureId)) {
             const lineFeats = _allLineFeatures.get(oldFeatureId);
             lineFeats.forEach((f) => {
@@ -969,38 +927,12 @@
         });
         // Fetch new HN from model and redraw with updated coords
         const newHN = _getHNFromModel(newFeatureId);
-        if (newHN) {
-            log(`  Redrawing HN with new ID ${newFeatureId}`);
+        if (newHN)
             drawHNs([newHN]);
-        } else {
-            log(`  WARNING: could not find new HN ${newFeatureId} in model; triggering redraw anyway`);
+        else {
+            log(`objectsChangedIdHNs: could not find new HN ${newFeatureId} in model; triggering redraw`);
             _redrawHNLayers();
         }
-    }
-
-    /**
-     * Handles house number edits and updates
-     * @param {Object} evt - WME event object
-     */
-    function objectsChangedHNs(evt) {
-        if (!evt || preventProcess())
-            return;
-        const getHNSegmentId = (hn) => (typeof hn.getSegmentId === 'function') ? hn.getSegmentId() : hn.segmentId;
-        if ((evt.length === 1) && getHNSegmentId(evt[0]) && !_segmentsToProcess.includes(getHNSegmentId(evt[0])))
-            _segmentsToProcess.push(getHNSegmentId(evt[0]));
-    }
-
-    /**
-     * Handles house number deletion events
-     * @param {Object} evt - WME event object with deleted house numbers
-     */
-    function objectsStateDeletedHNs(evt) {
-        if (!evt || preventProcess())
-            return;
-        const getHNSegmentId = (hn) => (typeof hn.getSegmentId === 'function') ? hn.getSegmentId() : hn.segmentId;
-        if ((evt.length === 1) && getHNSegmentId(evt[0]) && !_segmentsToProcess.includes(getHNSegmentId(evt[0])))
-            _segmentsToProcess.push(getHNSegmentId(evt[0]));
-        removeHNs(evt);
     }
 
     /**
@@ -1048,53 +980,24 @@
      */
     function _hnDrawEvent(ev) {
         if (preventProcess()) return;
-        
         const houseNumberId = ev.houseNumberId;
         const featureId = houseNumberId;
-        
-        log(`_hnDrawEvent triggered for HN ${houseNumberId}`);
-        
-        // Get old segment metadata before model is updated
-        const oldSegMeta = _numberFeatureMeta.get(`n-${featureId}`);
-        const oldSegmentId = oldSegMeta?.segmentId;
-        
-        log(`  oldSegmentId: ${oldSegmentId}`);
-        
-        // Wait for model to update with new fractionPoint (longer delay for HN edit dialog saves)
+        const oldSegmentId = _numberFeatureMeta.get(`n-${featureId}`)?.segmentId;
+        // Wait for model to update with new fractionPoint
         setTimeout(() => {
             const hn = _getHNFromModel(houseNumberId);
             if (hn) {
-                const getSegmentIdFunc = (typeof hn.getSegmentId === 'function') ? hn.getSegmentId() : hn.segmentId;
-                const newSegmentId = getSegmentIdFunc;
-                const hnNumber = (typeof hn.getNumber === 'function') ? hn.getNumber() : hn.number;
-                const hnUpdatedBy = (typeof hn.getUpdatedBy === 'function') ? hn.getUpdatedBy() : hn.updatedBy;
-                
-                log(`  HN object from model: ID=${houseNumberId}, number=${hnNumber}, segmentId=${newSegmentId}`);
-                log(`  HN.segmentId (direct)=${hn.segmentId}`);
-                log(`  HN.getSegmentId()=${typeof hn.getSegmentId === 'function' ? hn.getSegmentId() : 'N/A'}`);
-                log(`  newSegmentId: ${newSegmentId}`);
-                log(`  updatedBy: ${hnUpdatedBy}`);
-                
-                // DIAGNOSTIC: If segment stayed the same but feature count changed, the HN may have been duplicated
-                const isSegmentChange = oldSegmentId && oldSegmentId !== newSegmentId;
-                if (oldSegmentId && !isSegmentChange) {
-                    log(`  DIAGNOSTIC: Segment stayed ${newSegmentId} (no apparent change)`);
-                    log(`  _segmentHnIds size: ${_segmentHnIds.size}`);
-                    log(`  Current _numberFeatureMeta for this HN: ${JSON.stringify([..._numberFeatureMeta.entries()].filter(([k]) => k.includes(String(featureId))))}`);
-                }
-                
+                const newSegmentId = (typeof hn.getSegmentId === 'function') ? hn.getSegmentId() : hn.segmentId;
                 // Track both old and new segments for complete refresh
                 if (newSegmentId > 0 && !_segmentsToProcess.includes(newSegmentId))
                     _segmentsToProcess.push(newSegmentId);
-                
                 if (oldSegmentId && oldSegmentId !== newSegmentId && !_segmentsToProcess.includes(oldSegmentId))
                     _segmentsToProcess.push(oldSegmentId);
-                
                 // Redraw immediately with fresh HN data (includes updated fractionPoint)
                 drawHNs([hn]);
             }
             else {
-                log(`  ERROR: Failed to get HN from model after 300ms`);
+                logError(`_hnDrawEvent: failed to get HN ${houseNumberId} from model`);
             }
         }, 300);
     }
@@ -1108,28 +1011,18 @@
         // houseNumberId IS the featureId; try both string and numeric key forms
         const idStr = ev.houseNumberId;
         const idNum = parseInt(idStr, 10);
-        
-        log(`_hnDeleteEvent triggered for HN ${idStr}`);
-        log(`  Checking _allLineFeatures: has string ID=${_allLineFeatures.has(idStr)}, has numeric ID=${_allLineFeatures.has(idNum)}`);
-        
         const featureId = _allLineFeatures.has(idStr) ? idStr
             : (_allLineFeatures.has(idNum) ? idNum : null);
-        
         if (featureId !== null) {
-            log(`  Found featureId: ${featureId}, removing...`);
             const meta = _numberFeatureMeta.get(`n-${featureId}`);
             if (meta?.segmentId != null) _recentlyDeletedSegmentIds.add(meta.segmentId);
             removeHNs([{ getID: () => featureId, id: featureId, getSegmentId: () => meta?.segmentId ?? null, segmentId: meta?.segmentId ?? null }]);
         } else {
             // featureId not found — reconcile all tracked HNs against the W model
             // to remove any stale features (e.g. HN drawn with a temporary ID)
-            log(`  featureId NOT found in _allLineFeatures. Reconciling...`);
-            log(`  Current _allLineFeatures keys: ${[..._allLineFeatures.keys()].join(', ')}`);
             let hasStale = false;
             _allLineFeatures.forEach((_, fid) => {
                 if (!_getHNFromModel(fid)) {
-                    log(`    Removing stale feature: ${fid}`);
-                    // Capture segment ID before deleting meta
                     const m = _numberFeatureMeta.get(`n-${fid}`);
                     if (m?.segmentId != null) _recentlyDeletedSegmentIds.add(m.segmentId);
                     _allLineFeatures.delete(fid);
@@ -1280,7 +1173,7 @@
                 // This ensures fractionPoint and segment changes from the HN editor are captured
                 eventHandlers.hnEditingModeChanged = (ev) => {
                     if (!ev.isEditingHouseNumbers) {
-                        log('HN editing closed - forcing complete segment refresh');
+                    if (_DEBUG) log('HN editing closed - forcing complete segment refresh');
                         // Collect all segments that have HNs
                         const segmentsToRefresh = new Set();
                         _segmentHnIds.forEach((idSet, segId) => {
@@ -1308,7 +1201,7 @@
                 
                 // Detect save state: fires when redo stack is cleared after save
                 eventHandlers.afterRedoClear = () => {
-                    log('Save detected via redo-clear event');
+                    if (_DEBUG) log('Save detected via redo-clear event');
                     processSegmentsToRemove(true, [..._segmentsToProcess]);
                 };
                 wmeSDK.Events.on({ eventName: 'wme-after-redo-clear', eventHandler: eventHandlers.afterRedoClear });
@@ -1436,7 +1329,7 @@
             _hnNavPointsTooltipDiv.querySelector('#hnNavPointsTooltipDiv-tooltip').setAttribute('data-placement', dataPlacement);
             _hnNavPointsTooltipDiv.querySelector('#hnNavPointsTooltipDiv-tooltip').setAttribute('data-state', 'visible');
             _hnNavPointsTooltipDiv.querySelector('#hnNavPointsTooltipDiv-content').setAttribute('data-state', 'visible');
-            _popup = { segmentId, hNumber: hnNumber, inUse: true };
+            _popup = { segmentId, hnNumber, inUse: true };
         }
     }
 
@@ -1545,7 +1438,7 @@
             }, [{ change: handleTextboxChange }]);
         await loadSettingsFromStorage();
 
-        // Create SDK layers (replace OpenLayers Layer.Vector and Layer.Markers)
+        // Create SDK map layers
         if (wmeSDK) {
             wmeSDK.Map.addLayer({
                 layerName: _HN_LINES_LAYER,
