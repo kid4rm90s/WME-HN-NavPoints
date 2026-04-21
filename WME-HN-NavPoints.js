@@ -2,7 +2,7 @@
 // @name            WME HN NavPoints
 // @namespace       https://greasyfork.org/users/166843
 // @description     Shows navigation points of all house numbers in WME
-// @version         2026.04.21.04
+// @version         2026.04.21.05
 // @author          dBsooner
 // @grant           GM_info
 // @grant           GM_xmlhttpRequest
@@ -47,7 +47,7 @@
         _BETA_DL_URL = 'YUhSMGNITTZMeTluY21WaGMzbG1iM0pyTG05eVp5OXpZM0pwY0hSekx6TTVNRFUzTXkxM2JXVXRhRzR0Ym1GMmNHOXBiblJ6TFdKbGRHRXZZMjlrWlM5WFRVVWxNakJJVGlVeU1FNWhkbEJ2YVc1MGN5VXlNQ2hpWlhSaEtTNTFjMlZ5TG1weg==',
         _ALERT_UPDATE = true,
         _SCRIPT_VERSION = GM_info.script.version.toString(),
-        _SCRIPT_VERSION_CHANGES = ['FIX: House number lines/labels now removed immediately on delete without requiring a page refresh.', 'FIX: Undoing a house number deletion now correctly restores the line and label on the map.'],
+        _SCRIPT_VERSION_CHANGES = ['FIX: House number lines/labels now removed immediately on delete without requiring a page refresh.', 'FIX: Undoing a house number deletion now correctly restores the line and label on the map.', 'FIX: HN nav-points now update in real-time when a segment is moved/edited without requiring a save and refresh.'],
         _DEBUG = /[βΩ]/.test(_SCRIPT_SHORT_NAME),
         _LOAD_BEGIN_TIME = performance.now(),
         _elems = {
@@ -1140,11 +1140,23 @@
                     if (ev.dataModelName !== 'segments') return;
                     segmentsEvent.call({ action: 'objectschanged-id' }, ev.objectIds);
                 };
+                // Re-process segments whose geometry was modified (e.g. dragged/moved on map)
+                // Fraction points are stored as a ratio along the segment, so a geometry
+                // change shifts all nav-point positions even without a save.
+                eventHandlers.segmentsChanged = (ev) => {
+                    if (ev.dataModelName !== 'segments') return;
+                    const segs = ev.objectIds
+                        .map(id => wmeSDK.DataModel.Segments.getById({ segmentId: id }))
+                        .filter(o => o && (typeof o.getAttribute === 'function' ? o.getAttribute('hasHNs') : o.hasHouseNumbers));
+                    if (segs.length > 0)
+                        processSegs('objectschanged', segs);
+                };
                 wmeSDK.Events.on({ eventName: 'wme-data-model-objects-added', eventHandler: eventHandlers.segmentsAdded });
                 wmeSDK.Events.on({ eventName: 'wme-data-model-objects-removed', eventHandler: eventHandlers.segmentsRemoved });
                 wmeSDK.Events.on({ eventName: 'wme-data-model-objects-saved', eventHandler: eventHandlers.segmentsSynced });
                 wmeSDK.Events.on({ eventName: 'wme-data-model-object-state-deleted', eventHandler: eventHandlers.segmentsStateDeleted });
                 wmeSDK.Events.on({ eventName: 'wme-data-model-object-changed-id', eventHandler: eventHandlers.segmentsChangedId });
+                wmeSDK.Events.on({ eventName: 'wme-data-model-objects-changed', eventHandler: eventHandlers.segmentsChanged });
                 // Layer click for tooltip
                 eventHandlers.layerFeatureClicked = (clickEvt) => {
                     const meta = _numberFeatureMeta.get(String(clickEvt.featureId));
@@ -1219,6 +1231,7 @@
                 wmeSDK.Events.off({ eventName: 'wme-data-model-objects-saved', eventHandler: eventHandlers.segmentsSynced });
                 wmeSDK.Events.off({ eventName: 'wme-data-model-object-state-deleted', eventHandler: eventHandlers.segmentsStateDeleted });
                 wmeSDK.Events.off({ eventName: 'wme-data-model-object-changed-id', eventHandler: eventHandlers.segmentsChangedId });
+                wmeSDK.Events.off({ eventName: 'wme-data-model-objects-changed', eventHandler: eventHandlers.segmentsChanged });
                 wmeSDK.Events.off({ eventName: 'wme-map-zoom-changed', eventHandler: zoomEndEvent });
                 wmeSDK.Events.off({ eventName: 'wme-layer-feature-clicked', eventHandler: eventHandlers.layerFeatureClicked });
                 wmeSDK.Events.off({ eventName: 'wme-house-number-added', eventHandler: _hnDrawEvent });
